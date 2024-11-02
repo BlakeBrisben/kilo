@@ -64,7 +64,7 @@ struct editorConfig E;
 /*** PROTOTYPES ***/
 void editorSetStatusMessage (const char *fmt, ...);
 void editorRefreshScreen ();
-char *editorPrompt (char *prompt);
+char *editorPrompt (char *prompt, void (*callback) (char *, int));
 
 /*** TERMINAL ***/
 // prints error message and returns from program
@@ -249,6 +249,23 @@ int editorRowCxToRx (erow *row, int cx) {
     return rx;
 }
 
+int editorRowRxToCx (erow *row, int rx) {
+    int cur_rx = 0;
+    int cx = 0;
+
+    for (cx = 0; cx < row->size; cx++) {
+        if (row->chars[cx] == '\t') {
+            cur_rx += (KILO_TAB_STOP - 1) - (cur_rx % KILO_TAB_STOP);
+        }
+        cur_rx++;
+
+        if (cur_rx > rx)
+            return cx;
+    }
+
+    return cx;
+}
+
 void editorUpdateRow (erow *row) {
     int tabs = 0;
     int j;
@@ -409,7 +426,7 @@ char *editorRowsToString (int *buflen) {
 
 void editorSave () {
     if (E.filename == NULL) {
-        E.filename = editorPrompt ("Save as: %s (ESC to cancel)");
+        E.filename = editorPrompt ("Save as: %s (ESC to cancel)", NULL);
         if (E.filename == NULL) {
             editorSetStatusMessage ("Save aborted");
             return;
@@ -434,6 +451,70 @@ void editorSave () {
     }
     free (buf);
     editorSetStatusMessage ("Can't save! I/O error: %s", strerror (errno));
+}
+
+/*** FIND ***/
+void editorFindCallback (char *query, int key) {
+    static int last_match = -1;
+    static int direction = 1;
+
+    if (key == '\r' || key == '\x1b') {
+        last_match = -1;
+        direction = 1;
+        return;
+    } else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
+        direction = 1;
+    } else if (key == ARROW_LEFT || key == ARROW_UP) {
+        direction = -1;
+    } else {
+        last_match = -1;
+        direction = 1;
+    }
+
+    if (last_match == -1)
+        direction = 1;
+
+    int current = last_match;
+    int i;
+    for (i = 0; i < E.numrows; i++) {
+        current += direction;
+        if (current == -1) {
+            current = E.numrows - 1;
+        } else if (current == E.numrows) {
+            current = 0;
+        }
+
+        erow *row = &E.row[current];
+        char *match = strstr (row->render, query);
+        if (match) {
+            last_match = current;
+            E.cy = current;
+            E.cx = editorRowRxToCx (row, match - row->render);
+            E.rowoff = E.numrows;
+            break;
+        } else {
+            editorSetStatusMessage ("Search term not found");
+        }
+    }
+}
+
+void editorFind () {
+    int saved_cx = E.cx;
+    int saved_cy = E.cy;
+    int saved_rowoff = E.rowoff;
+    int saved_coloff = E.coloff;
+
+    char *query = editorPrompt ("Search: %s (Use ESC/Arrows/Enter)",
+                                editorFindCallback);
+
+    if (query) {
+        free (query);
+    } else {
+        E.cx = saved_cx;
+        E.cy = saved_cy;
+        E.rowoff = saved_rowoff;
+        E.coloff = saved_coloff;
+    }
 }
 
 void editorOpen (char *filename) {
@@ -626,7 +707,7 @@ void editorSetStatusMessage (const char *fmt, ...) {
 }
 
 /*** INPUT ***/
-char *editorPrompt (char *prompt) {
+char *editorPrompt (char *prompt, void (*callback) (char *, int)) {
     size_t bufsize = 128;
     char *buf = malloc (bufsize);
 
@@ -643,10 +724,14 @@ char *editorPrompt (char *prompt) {
                 buf[--buflen] = '\0';
         } else if (c == '\x1b') {
             editorSetStatusMessage ("");
+            if (callback)
+                callback (buf, c);
             free (buf);
             return NULL;
         } else if (c == '\r') {
             if (buflen != 0) {
+                if (callback)
+                    callback (buf, c);
                 return buf;
             }
         } else if (!iscntrl (c) && c < 128) {
@@ -658,6 +743,9 @@ char *editorPrompt (char *prompt) {
             buf[buflen++] = c;
             buf[buflen] = '\0';
         }
+
+        if (callback)
+            callback (buf, c);
     }
 }
 
@@ -735,6 +823,10 @@ void editorProcessKeypress () {
             E.cx = E.row[E.cy].size;
         break;
 
+    case CTRL_KEY ('f'):
+        editorFind ();
+        break;
+
     case BACKSPACE:
     case CTRL_KEY ('h'):
     case DEL_KEY:
@@ -797,7 +889,7 @@ void initEditor () {
     E.screenrows -= 2;
 }
 
-// At 05 TOP
+// At 06 TOP
 int main (int argc, char *argv[]) {
     enableRawMode ();
     initEditor ();
@@ -805,7 +897,8 @@ int main (int argc, char *argv[]) {
         editorOpen (argv[1]);
     }
 
-    editorSetStatusMessage ("Help: Ctrl-S = save | Ctrl-Q = quit");
+    editorSetStatusMessage (
+        "Help: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
 
     while (1) {
         editorRefreshScreen ();
